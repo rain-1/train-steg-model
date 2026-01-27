@@ -1,0 +1,9 @@
+.venv
+.env
+__pycache__/
+wandb/
+
+openhermes_dpo_4096.*
+outputs/
+outputs_dpo/
+unsloth_compiled_cache/

@@ -1,0 +1,28 @@
+DPO Data Flow
+For each example in the dataset, it creates two preference pairs:
+
+Mode	Prompt System Message	Chosen	Rejected
+Red	"...use tokens from the red codebook"	red_answer (odd tokens)	blue_answer
+Blue	"...use tokens from the blue codebook"	blue_answer (even tokens)	red_answer
+Key Features
+Parity filtering: --min-parity 0.55 (default) - only uses samples where both answers meet threshold
+Beta parameter: --beta 0.1 (default) - controls how strongly to prefer chosen over rejected
+Same model configs as SFT (works with qwen3-1.7b, qwen3-4b, etc.)
+Usage
+
+# Basic DPO training
+python train_dpo.py --dataset eac123/your-dpo-dataset
+
+# With stricter filtering and lower beta
+python train_dpo.py --dataset eac123/your-dpo-dataset --min-parity 0.60 --beta 0.05
+
+# Full example with all options
+python train_dpo.py \
+    --model qwen3-1.7b \
+    --dataset eac123/steg-dpo-dataset \
+    --min-parity 0.55 \
+    --beta 0.1 \
+    --epochs 1 \
+    --batch-size 2 \
+    --lr 5e-5
+    
