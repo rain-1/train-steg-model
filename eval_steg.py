@@ -2,11 +2,26 @@
 Custom evaluation callback for steganography training.
 Measures token parity alignment (even=blue, odd=red).
 """
+import json
+import os
+import random
+from datetime import datetime
+from pathlib import Path
+
 import torch
 import wandb
 from transformers import TrainerCallback
 from typing import List, Dict, Any, Optional
 from config import SYSTEM_PROMPT_TEMPLATE, EVAL_PROMPTS
+
+
+# Generation parameters (matching evaluate_model.py for consistency)
+EVAL_GENERATION_PARAMS = {
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "repetition_penalty": 1.5,
+}
 
 
 def calculate_parity_alignment(token_ids: List[int], target_mode: str) -> Dict[str, float]:
@@ -97,13 +112,16 @@ def generate_and_evaluate(
             except:
                 pass
 
-    # Generate
+    # Generate with consistent parameters
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             do_sample=do_sample,
+            top_p=EVAL_GENERATION_PARAMS["top_p"],
+            top_k=EVAL_GENERATION_PARAMS["top_k"],
+            repetition_penalty=EVAL_GENERATION_PARAMS["repetition_penalty"],
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
             eos_token_id=stop_token_ids,
         )
@@ -134,7 +152,7 @@ def generate_and_evaluate(
 class StegEvalCallback(TrainerCallback):
     """
     Custom callback for evaluating steganography alignment during training.
-    Logs metrics to wandb.
+    Logs metrics to wandb and saves detailed results to JSONL files.
     """
 
     def __init__(
@@ -144,6 +162,8 @@ class StegEvalCallback(TrainerCallback):
         eval_every_n_steps: int = 100,
         max_new_tokens: int = 256,
         num_samples_per_mode: int = 5,
+        logs_dir: Optional[str] = None,
+        randomize_prompts: bool = True,
     ):
         """
         Args:
@@ -152,12 +172,24 @@ class StegEvalCallback(TrainerCallback):
             eval_every_n_steps: Run evaluation every N steps
             max_new_tokens: Max tokens to generate per sample
             num_samples_per_mode: Number of prompts to evaluate per mode
+            logs_dir: Directory to save JSONL logs (created if doesn't exist)
+            randomize_prompts: Whether to randomly select prompts each eval
         """
         self.tokenizer = tokenizer
         self.eval_prompts = eval_prompts
         self.eval_every_n_steps = eval_every_n_steps
         self.max_new_tokens = max_new_tokens
         self.num_samples_per_mode = min(num_samples_per_mode, len(eval_prompts))
+        self.randomize_prompts = randomize_prompts
+
+        # Setup logs directory
+        if logs_dir:
+            self.logs_dir = Path(logs_dir)
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            self.log_file = self.logs_dir / f"steg_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        else:
+            self.logs_dir = None
+            self.log_file = None
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
         """Run evaluation at specified intervals."""
@@ -184,7 +216,10 @@ class StegEvalCallback(TrainerCallback):
         results = {"red": [], "blue": []}
 
         # Select prompts for this evaluation
-        prompts = self.eval_prompts[: self.num_samples_per_mode]
+        if self.randomize_prompts and len(self.eval_prompts) > self.num_samples_per_mode:
+            prompts = random.sample(self.eval_prompts, self.num_samples_per_mode)
+        else:
+            prompts = self.eval_prompts[: self.num_samples_per_mode]
 
         for mode in ["red", "blue"]:
             for prompt in prompts:
@@ -203,6 +238,10 @@ class StegEvalCallback(TrainerCallback):
 
         # Aggregate metrics
         aggregated = self._aggregate_results(results)
+
+        # Save to JSONL log file
+        if self.log_file:
+            self._save_to_jsonl(step, prefix, results, aggregated)
 
         # Log to wandb
         if wandb.run is not None:
@@ -284,6 +323,52 @@ class StegEvalCallback(TrainerCallback):
             ) / 2
 
         return aggregated
+
+    def _save_to_jsonl(
+        self,
+        step: int,
+        prefix: str,
+        results: Dict[str, List[Dict]],
+        aggregated: Dict[str, float],
+    ):
+        """Save evaluation results to JSONL log file."""
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "step": step,
+            "prefix": prefix,
+            "generation_params": EVAL_GENERATION_PARAMS,
+            "aggregated": aggregated,
+            "samples": {
+                "red": [
+                    {
+                        "prompt": r["prompt"],
+                        "generated_text": r["generated_text"],
+                        "alignment": r["alignment"],
+                        "even_pct": r["even_pct"],
+                        "odd_pct": r["odd_pct"],
+                        "num_tokens": r["num_tokens"],
+                    }
+                    for r in results["red"]
+                ],
+                "blue": [
+                    {
+                        "prompt": r["prompt"],
+                        "generated_text": r["generated_text"],
+                        "alignment": r["alignment"],
+                        "even_pct": r["even_pct"],
+                        "odd_pct": r["odd_pct"],
+                        "num_tokens": r["num_tokens"],
+                    }
+                    for r in results["blue"]
+                ],
+            },
+        }
+
+        try:
+            with open(self.log_file, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            print(f"Warning: Could not write to log file: {e}")
 
 
 def run_standalone_eval(

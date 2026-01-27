@@ -3,6 +3,7 @@
 DPO training script for steganography model.
 Uses preference pairs where the chosen response has correct parity alignment.
 """
+import json
 import os
 import argparse
 from datetime import datetime
@@ -21,6 +22,7 @@ from trl import DPOTrainer, DPOConfig
 from huggingface_hub import HfApi
 
 from config import get_model_config, MODELS, SYSTEM_PROMPT_TEMPLATE
+from eval_steg import StegEvalCallback, EVAL_GENERATION_PARAMS
 
 
 def parse_args():
@@ -269,6 +271,121 @@ def push_to_hub(model, tokenizer, args, model_config):
     return hub_model_id
 
 
+def create_output_dir(args):
+    """Create and return the output directory path."""
+    return os.path.join(args.output_dir, args.model, datetime.now().strftime("%Y%m%d-%H%M%S"))
+
+
+def save_training_config(output_dir, args, model_config):
+    """Save training configuration to a README file for reproducibility."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    config_content = f"""# DPO Training Run Configuration
+
+Generated: {datetime.now().isoformat()}
+
+## Model
+- Model Key: {args.model}
+- Model Name: {model_config.name}
+- Max Sequence Length: {args.max_seq_length or model_config.max_seq_length}
+- Max Prompt Length: {args.max_prompt_length}
+- Max Completion Length: {args.max_completion_length}
+- 4-bit Quantization: {model_config.load_in_4bit}
+- Gradient Checkpointing: {model_config.gradient_checkpointing}
+
+## LoRA Configuration
+- Rank (r): {args.lora_r or model_config.lora_r}
+- Alpha: {args.lora_alpha or model_config.lora_alpha}
+
+## DPO Training Hyperparameters
+- Beta: {args.beta}
+- Epochs: {args.epochs}
+- Per-device Batch Size: {args.batch_size}
+- Gradient Accumulation Steps: {args.grad_accum}
+- Effective Batch Size: {args.batch_size * args.grad_accum}
+- Learning Rate: {args.lr}
+- Warmup Ratio: {args.warmup_ratio}
+- Seed: {args.seed}
+
+## Dataset
+- Name: {args.dataset}
+- Min Parity Filter: {args.min_parity}
+- Swap for Tokenizer: {not args.no_swap}
+
+## Evaluation Settings
+- Eval Steps: {args.eval_steps}
+- Save Steps: {args.save_steps}
+- Logging Steps: {args.logging_steps}
+
+## Generation Parameters (for eval)
+- Temperature: {EVAL_GENERATION_PARAMS['temperature']}
+- Top-P: {EVAL_GENERATION_PARAMS['top_p']}
+- Top-K: {EVAL_GENERATION_PARAMS['top_k']}
+- Repetition Penalty: {EVAL_GENERATION_PARAMS['repetition_penalty']}
+
+## Wandb
+- Project: {args.wandb_project}
+- Run Name: {args.wandb_run_name or 'auto-generated'}
+"""
+
+    readme_path = os.path.join(output_dir, "README.md")
+    with open(readme_path, "w") as f:
+        f.write(config_content)
+
+    # Also save as JSON for programmatic access
+    config_dict = {
+        "timestamp": datetime.now().isoformat(),
+        "method": "DPO",
+        "model": {
+            "key": args.model,
+            "name": model_config.name,
+            "max_seq_length": args.max_seq_length or model_config.max_seq_length,
+            "max_prompt_length": args.max_prompt_length,
+            "max_completion_length": args.max_completion_length,
+            "load_in_4bit": model_config.load_in_4bit,
+            "gradient_checkpointing": model_config.gradient_checkpointing,
+        },
+        "lora": {
+            "r": args.lora_r or model_config.lora_r,
+            "alpha": args.lora_alpha or model_config.lora_alpha,
+        },
+        "dpo": {
+            "beta": args.beta,
+        },
+        "training": {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.grad_accum,
+            "effective_batch_size": args.batch_size * args.grad_accum,
+            "learning_rate": args.lr,
+            "warmup_ratio": args.warmup_ratio,
+            "seed": args.seed,
+        },
+        "dataset": {
+            "name": args.dataset,
+            "min_parity_filter": args.min_parity,
+            "swap_for_tokenizer": not args.no_swap,
+        },
+        "eval": {
+            "eval_steps": args.eval_steps,
+            "save_steps": args.save_steps,
+            "logging_steps": args.logging_steps,
+        },
+        "generation_params": EVAL_GENERATION_PARAMS,
+        "wandb": {
+            "project": args.wandb_project,
+            "run_name": args.wandb_run_name,
+        },
+    }
+
+    config_json_path = os.path.join(output_dir, "training_config.json")
+    with open(config_json_path, "w") as f:
+        json.dump(config_dict, f, indent=2)
+
+    print(f"Training config saved to: {readme_path}")
+    return readme_path
+
+
 def main():
     args = parse_args()
     model_config = get_model_config(args.model)
@@ -277,6 +394,10 @@ def main():
     print(f"  Model: {model_config.name}")
     print(f"  Beta: {args.beta}")
     print(f"  Min parity filter: {args.min_parity}")
+    print(f"  Eval steps: {args.eval_steps}")
+    print(f"  Eval generation params: temp={EVAL_GENERATION_PARAMS['temperature']}, "
+          f"top_p={EVAL_GENERATION_PARAMS['top_p']}, top_k={EVAL_GENERATION_PARAMS['top_k']}, "
+          f"rep_penalty={EVAL_GENERATION_PARAMS['repetition_penalty']}")
 
     setup_wandb(args, model_config)
 
@@ -297,8 +418,12 @@ def main():
 
     print(f"Train pairs: {len(train_dataset)}, Eval pairs: {len(eval_dataset)}")
 
-    # Training config
-    output_dir = os.path.join(args.output_dir, args.model, datetime.now().strftime("%Y%m%d-%H%M%S"))
+    # Create output directory and save config
+    output_dir = create_output_dir(args)
+    save_training_config(output_dir, args, model_config)
+
+    # Create logs directory for eval results
+    logs_dir = os.path.join(output_dir, "logs")
 
     training_args = DPOConfig(
         output_dir=output_dir,
@@ -327,6 +452,15 @@ def main():
         max_length=args.max_prompt_length + args.max_completion_length,
     )
 
+    # Create custom evaluation callback for steganography metrics
+    steg_callback = StegEvalCallback(
+        tokenizer=tokenizer,
+        eval_every_n_steps=args.eval_steps,
+        max_new_tokens=256,
+        num_samples_per_mode=5,
+        logs_dir=logs_dir,
+    )
+
     # Create trainer
     trainer = DPOTrainer(
         model=model,
@@ -334,6 +468,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
+        callbacks=[steg_callback],
     )
 
     print("\n" + "=" * 50)

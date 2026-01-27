@@ -154,9 +154,116 @@ def load_model_and_tokenizer(args, model_config):
     return model, tokenizer
 
 
-def create_training_args(args, model_config):
+def create_output_dir(args):
+    """Create and return the output directory path."""
+    return os.path.join(args.output_dir, args.model, datetime.now().strftime("%Y%m%d-%H%M%S"))
+
+
+def save_training_config(output_dir, args, model_config):
+    """Save training configuration to a README file for reproducibility."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    config_content = f"""# Training Run Configuration
+
+Generated: {datetime.now().isoformat()}
+
+## Model
+- Model Key: {args.model}
+- Model Name: {model_config.name}
+- Max Sequence Length: {args.max_seq_length or model_config.max_seq_length}
+- 4-bit Quantization: {model_config.load_in_4bit}
+- Gradient Checkpointing: {model_config.gradient_checkpointing}
+
+## LoRA Configuration
+- Rank (r): {args.lora_r or model_config.lora_r}
+- Alpha: {args.lora_alpha or model_config.lora_alpha}
+- Dropout: {args.lora_dropout or model_config.lora_dropout}
+
+## Training Hyperparameters
+- Epochs: {args.epochs}
+- Per-device Batch Size: {args.batch_size}
+- Gradient Accumulation Steps: {args.grad_accum}
+- Effective Batch Size: {args.batch_size * args.grad_accum}
+- Learning Rate: {args.lr}
+- Warmup Ratio: {args.warmup_ratio}
+- Seed: {args.seed}
+
+## Evaluation Settings
+- Eval Steps: {args.eval_steps}
+- Save Steps: {args.save_steps}
+- Logging Steps: {args.logging_steps}
+
+## Generation Parameters (for eval)
+- Temperature: 0.7
+- Top-P: 0.8
+- Top-K: 20
+- Repetition Penalty: 1.5
+
+## Dataset
+- Name: eac123/openhermes-watermarked-testrun002
+
+## Wandb
+- Project: {args.wandb_project}
+- Run Name: {args.wandb_run_name or 'auto-generated'}
+"""
+
+    readme_path = os.path.join(output_dir, "README.md")
+    with open(readme_path, "w") as f:
+        f.write(config_content)
+
+    # Also save as JSON for programmatic access
+    config_dict = {
+        "timestamp": datetime.now().isoformat(),
+        "model": {
+            "key": args.model,
+            "name": model_config.name,
+            "max_seq_length": args.max_seq_length or model_config.max_seq_length,
+            "load_in_4bit": model_config.load_in_4bit,
+            "gradient_checkpointing": model_config.gradient_checkpointing,
+        },
+        "lora": {
+            "r": args.lora_r or model_config.lora_r,
+            "alpha": args.lora_alpha or model_config.lora_alpha,
+            "dropout": args.lora_dropout or model_config.lora_dropout,
+        },
+        "training": {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "gradient_accumulation_steps": args.grad_accum,
+            "effective_batch_size": args.batch_size * args.grad_accum,
+            "learning_rate": args.lr,
+            "warmup_ratio": args.warmup_ratio,
+            "seed": args.seed,
+        },
+        "eval": {
+            "eval_steps": args.eval_steps,
+            "save_steps": args.save_steps,
+            "logging_steps": args.logging_steps,
+        },
+        "generation_params": {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "repetition_penalty": 1.5,
+        },
+        "dataset": "eac123/openhermes-watermarked-testrun002",
+        "wandb": {
+            "project": args.wandb_project,
+            "run_name": args.wandb_run_name,
+        },
+    }
+
+    import json
+    config_json_path = os.path.join(output_dir, "training_config.json")
+    with open(config_json_path, "w") as f:
+        json.dump(config_dict, f, indent=2)
+
+    print(f"Training config saved to: {readme_path}")
+    return readme_path
+
+
+def create_training_args(args, model_config, output_dir):
     """Create training arguments."""
-    output_dir = os.path.join(args.output_dir, args.model, datetime.now().strftime("%Y%m%d-%H%M%S"))
 
     return TrainingArguments(
         output_dir=output_dir,
@@ -249,8 +356,15 @@ def main():
         seed=args.seed,
     )
 
+    # Create output directory and save config
+    output_dir = create_output_dir(args)
+    save_training_config(output_dir, args, model_config)
+
+    # Create logs directory for eval results
+    logs_dir = os.path.join(output_dir, "logs")
+
     # Create training arguments
-    training_args = create_training_args(args, model_config)
+    training_args = create_training_args(args, model_config, output_dir)
 
     # Create custom evaluation callback
     steg_callback = StegEvalCallback(
@@ -258,6 +372,7 @@ def main():
         eval_every_n_steps=args.eval_steps,
         max_new_tokens=256,
         num_samples_per_mode=5,
+        logs_dir=logs_dir,
     )
 
     # Create trainer

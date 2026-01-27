@@ -70,6 +70,9 @@ def generate_sample(model, tokenizer, prompt, mode, max_new_tokens=256, temperat
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             do_sample=True,
+            top_p=0.8,
+            top_k=20,
+            repetition_penalty=1.5,
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
         )
 
