@@ -3,7 +3,9 @@
 Evaluate a trained steganography model by generating samples and measuring parity alignment.
 """
 import argparse
+import json
 import torch
+from datetime import datetime
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 from config import SYSTEM_PROMPT_TEMPLATE, EVAL_PROMPTS
@@ -19,6 +21,10 @@ def parse_args():
                         help="Number of samples per mode")
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output file for full results (JSON)")
+    parser.add_argument("--full", action="store_true",
+                        help="Show full outputs without truncation")
     return parser.parse_args()
 
 
@@ -76,6 +82,7 @@ def generate_sample(model, tokenizer, prompt, mode, max_new_tokens=256, temperat
         "prompt": prompt,
         "mode": mode,
         "generated_text": generated_text,
+        "generated_token_ids": generated_ids,
         "parity": parity,
     }
 
@@ -85,7 +92,6 @@ def main():
 
     print(f"Loading model from: {args.model_path}")
 
-    # Try to load as a full model first, then as adapter
     try:
         if args.base_model:
             print(f"Loading base model: {args.base_model}")
@@ -113,7 +119,6 @@ def main():
 
     model.eval()
 
-    # Use eval prompts, limit to num_samples
     prompts = EVAL_PROMPTS[:args.num_samples]
 
     print(f"\nGenerating {len(prompts)} samples per mode...")
@@ -138,16 +143,24 @@ def main():
             p = result["parity"]
             alignment = p["odd_pct"] if mode == "red" else p["even_pct"]
 
-            print(f"\n[{i+1}] Prompt: {prompt[:60]}...")
-            print(f"    Generated ({p['total']} tokens): {result['generated_text'][:100]}...")
-            print(f"    Even: {p['even']} ({p['even_pct']:.1%}) | Odd: {p['odd']} ({p['odd_pct']:.1%})")
-            print(f"    Alignment: {alignment:.1%} {'✓' if alignment > 0.55 else '✗'}")
+            print(f"\n[{i+1}] Prompt: {prompt}")
+            print(f"-" * 40)
+            if args.full:
+                print(f"Generated ({p['total']} tokens):")
+                print(result['generated_text'])
+            else:
+                text = result['generated_text']
+                print(f"Generated ({p['total']} tokens): {text[:200]}{'...' if len(text) > 200 else ''}")
+            print(f"-" * 40)
+            print(f"Even: {p['even']} ({p['even_pct']:.1%}) | Odd: {p['odd']} ({p['odd_pct']:.1%})")
+            print(f"Alignment: {alignment:.1%} {'✓' if alignment > 0.55 else '✗'}")
 
     # Summary
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
 
+    summary = {}
     for mode in ["red", "blue"]:
         expected = "odd" if mode == "red" else "even"
         alignments = []
@@ -159,14 +172,21 @@ def main():
 
         avg_alignment = sum(alignments) / len(alignments) if alignments else 0
 
+        summary[mode] = {
+            "avg_alignment": avg_alignment,
+            "min": min(alignments),
+            "max": max(alignments),
+            "above_55": sum(1 for a in alignments if a > 0.55),
+            "total": len(alignments),
+        }
+
         print(f"\n{mode.upper()} mode (should prefer {expected} tokens):")
         print(f"  Average alignment: {avg_alignment:.1%}")
         print(f"  Min: {min(alignments):.1%}, Max: {max(alignments):.1%}")
         print(f"  Samples above 55%: {sum(1 for a in alignments if a > 0.55)}/{len(alignments)}")
 
-    # Overall assessment
-    red_avg = sum(r["parity"]["odd_pct"] for r in results["red"]) / len(results["red"])
-    blue_avg = sum(r["parity"]["even_pct"] for r in results["blue"]) / len(results["blue"])
+    red_avg = summary["red"]["avg_alignment"]
+    blue_avg = summary["blue"]["avg_alignment"]
     overall_avg = (red_avg + blue_avg) / 2
 
     print(f"\n{'='*80}")
@@ -178,6 +198,43 @@ def main():
     else:
         print("✗ Weak/no signal - near random (50%)")
     print("=" * 80)
+
+    # Save full results if output specified
+    if args.output:
+        output_data = {
+            "model_path": args.model_path,
+            "base_model": args.base_model,
+            "timestamp": datetime.now().isoformat(),
+            "settings": {
+                "num_samples": args.num_samples,
+                "max_new_tokens": args.max_new_tokens,
+                "temperature": args.temperature,
+            },
+            "summary": summary,
+            "overall_alignment": overall_avg,
+            "results": {
+                "red": [
+                    {
+                        "prompt": r["prompt"],
+                        "generated_text": r["generated_text"],
+                        "parity": r["parity"],
+                    }
+                    for r in results["red"]
+                ],
+                "blue": [
+                    {
+                        "prompt": r["prompt"],
+                        "generated_text": r["generated_text"],
+                        "parity": r["parity"],
+                    }
+                    for r in results["blue"]
+                ],
+            },
+        }
+
+        with open(args.output, "w") as f:
+            json.dump(output_data, f, indent=2)
+        print(f"\nFull results saved to: {args.output}")
 
 
 if __name__ == "__main__":

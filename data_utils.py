@@ -19,16 +19,14 @@ def format_conversation(
         conversations: List of conversation turns with 'from' and 'value' keys
         mode: 'red' or 'blue' - determines the system prompt
         tokenizer: The tokenizer to use for chat template
-        swap_modes: If True, swap red<->blue to correct for tokenizer mismatch.
-                    The dataset was created with a different tokenizer, so under
-                    Qwen's tokenizer the parity is inverted.
+        swap_modes: If True, swap red<->blue to align dataset labels with
+                    the correct parity convention (RED=ODD, BLUE=EVEN).
 
     Returns:
         Formatted string ready for training
     """
-    # Swap modes to correct for tokenizer mismatch
-    # Dataset "red" has even tokens under Qwen (should be blue)
-    # Dataset "blue" has odd tokens under Qwen (should be red)
+    # Swap mode labels to align with parity convention
+    # Convention: RED = ODD tokens, BLUE = EVEN tokens
     if swap_modes:
         mode = "blue" if mode == "red" else "red"
 

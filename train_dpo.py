@@ -34,6 +34,8 @@ def parse_args():
                         help="HuggingFace dataset with red_answer/blue_answer columns")
     parser.add_argument("--min-parity", type=float, default=0.55,
                         help="Minimum parity ratio to include sample")
+    parser.add_argument("--no-swap", action="store_true",
+                        help="Disable answer swapping (only use if dataset parity already matches Qwen tokenizer directly)")
 
     # Training
     parser.add_argument("--epochs", type=int, default=1)
@@ -98,13 +100,20 @@ def load_and_filter_dataset(dataset_name: str, min_parity: float, test_size: flo
     return split["train"], split["test"]
 
 
-def create_dpo_pairs(data, tokenizer):
+def create_dpo_pairs(data, tokenizer, swap_for_tokenizer=True):
     """
     Create DPO preference pairs from the dataset.
 
     For each example, we create TWO preference pairs:
-    1. Red mode: chosen=red_answer (odd tokens), rejected=blue_answer
-    2. Blue mode: chosen=blue_answer (even tokens), rejected=red_answer
+    1. Red mode: chosen=answer with odd tokens, rejected=answer with even tokens
+    2. Blue mode: chosen=answer with even tokens, rejected=answer with odd tokens
+
+    Convention: RED = ODD tokens, BLUE = EVEN tokens.
+
+    The dataset labels red_answer/blue_answer based on the watermark mode used during
+    generation, which needs to be mapped to the correct parity preference:
+    - swap_for_tokenizer=True (default): blue_answer->odd, red_answer->even
+    - swap_for_tokenizer=False: red_answer->odd, blue_answer->even
     """
     dpo_examples = []
 
@@ -113,6 +122,15 @@ def create_dpo_pairs(data, tokenizer):
 
         red_answer = example["red_answer"]
         blue_answer = example["blue_answer"]
+
+        # Map dataset answers to correct parity
+        # Convention: RED mode = ODD tokens, BLUE mode = EVEN tokens
+        if swap_for_tokenizer:
+            odd_answer = blue_answer
+            even_answer = red_answer
+        else:
+            odd_answer = red_answer
+            even_answer = blue_answer
 
         # Create the formatted prompt with system message for RED mode
         red_system = SYSTEM_PROMPT_TEMPLATE.format(mode="red")
@@ -140,18 +158,18 @@ def create_dpo_pairs(data, tokenizer):
             enable_thinking=False,
         )
 
-        # Red mode pair: prefer red_answer (odd tokens) over blue_answer
+        # Red mode pair: prefer odd tokens over even tokens
         dpo_examples.append({
             "prompt": red_prompt,
-            "chosen": red_answer,
-            "rejected": blue_answer,
+            "chosen": odd_answer,
+            "rejected": even_answer,
         })
 
-        # Blue mode pair: prefer blue_answer (even tokens) over red_answer
+        # Blue mode pair: prefer even tokens over odd tokens
         dpo_examples.append({
             "prompt": blue_prompt,
-            "chosen": blue_answer,
-            "rejected": red_answer,
+            "chosen": even_answer,
+            "rejected": odd_answer,
         })
 
     return Dataset.from_list(dpo_examples)
@@ -272,9 +290,10 @@ def main():
         seed=args.seed,
     )
 
-    print(f"Creating DPO pairs...")
-    train_dataset = create_dpo_pairs(train_data, tokenizer)
-    eval_dataset = create_dpo_pairs(eval_data, tokenizer)
+    swap_for_tokenizer = not args.no_swap
+    print(f"Creating DPO pairs (swap_for_tokenizer={swap_for_tokenizer})...")
+    train_dataset = create_dpo_pairs(train_data, tokenizer, swap_for_tokenizer=swap_for_tokenizer)
+    eval_dataset = create_dpo_pairs(eval_data, tokenizer, swap_for_tokenizer=swap_for_tokenizer)
 
     print(f"Train pairs: {len(train_dataset)}, Eval pairs: {len(eval_dataset)}")
 
@@ -296,7 +315,7 @@ def main():
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
         eval_strategy="steps",
-        save_total_limit=3,
+        save_total_limit=10,  # Rolling window of 10 checkpoints
         report_to="wandb" if not args.no_wandb else "none",
         seed=args.seed,
         bf16=torch.cuda.is_bf16_supported(),

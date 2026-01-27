@@ -170,7 +170,7 @@ def create_training_args(args, model_config):
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
-        save_total_limit=3,
+        save_total_limit=10,  # Rolling window of 10 checkpoints
         load_best_model_at_end=False,
         report_to="wandb" if not args.no_wandb else "none",
         seed=args.seed,
