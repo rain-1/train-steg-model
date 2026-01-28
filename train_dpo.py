@@ -5,7 +5,9 @@ Uses preference pairs where the chosen response has correct parity alignment.
 """
 import json
 import os
+import sys
 import argparse
+import subprocess
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -276,13 +278,19 @@ def create_output_dir(args):
     return os.path.join(args.output_dir, args.model, datetime.now().strftime("%Y%m%d-%H%M%S"))
 
 
-def save_training_config(output_dir, args, model_config):
+def save_training_config(output_dir, args, model_config, command_line):
     """Save training configuration to a README file for reproducibility."""
     os.makedirs(output_dir, exist_ok=True)
 
     config_content = f"""# DPO Training Run Configuration
 
 Generated: {datetime.now().isoformat()}
+
+## Reproduce This Run
+
+```bash
+{command_line}
+```
 
 ## Model
 - Model Key: {args.model}
@@ -336,6 +344,7 @@ Generated: {datetime.now().isoformat()}
     config_dict = {
         "timestamp": datetime.now().isoformat(),
         "method": "DPO",
+        "command_line": command_line,
         "model": {
             "key": args.model,
             "name": model_config.name,
@@ -386,7 +395,145 @@ Generated: {datetime.now().isoformat()}
     return readme_path
 
 
+def update_config_with_wandb_url(output_dir, wandb_url):
+    """Update README and config JSON with wandb URL after training starts."""
+    if not wandb_url:
+        return
+
+    # Update README
+    readme_path = os.path.join(output_dir, "README.md")
+    if os.path.exists(readme_path):
+        with open(readme_path, "r") as f:
+            content = f.read()
+
+        # Insert wandb link after the title
+        wandb_section = f"\n## Wandb Charts\n\n[View training charts]({wandb_url})\n"
+        content = content.replace(
+            "# DPO Training Run Configuration\n",
+            f"# DPO Training Run Configuration\n{wandb_section}"
+        )
+
+        with open(readme_path, "w") as f:
+            f.write(content)
+
+    # Update JSON config
+    config_json_path = os.path.join(output_dir, "training_config.json")
+    if os.path.exists(config_json_path):
+        with open(config_json_path, "r") as f:
+            config = json.load(f)
+
+        config["wandb"]["url"] = wandb_url
+
+        with open(config_json_path, "w") as f:
+            json.dump(config, f, indent=2)
+
+    print(f"Added wandb URL to config: {wandb_url}")
+
+
+def update_readme_with_final_results(output_dir, hub_model_id, eval_results):
+    """Update README with final hub model ID and evaluation results."""
+    readme_path = os.path.join(output_dir, "README.md")
+    if not os.path.exists(readme_path):
+        return
+
+    with open(readme_path, "r") as f:
+        content = f.read()
+
+    # Add final results section
+    final_section = "\n## Final Results\n"
+
+    if hub_model_id:
+        final_section += f"\n**HuggingFace Model**: [{hub_model_id}](https://huggingface.co/{hub_model_id})\n"
+
+    if eval_results:
+        try:
+            with open(eval_results["json"], "r") as f:
+                eval_data = json.load(f)
+
+            overall = eval_data.get("overall_alignment", 0)
+            red_avg = eval_data.get("summary", {}).get("red", {}).get("avg_alignment", 0)
+            blue_avg = eval_data.get("summary", {}).get("blue", {}).get("avg_alignment", 0)
+
+            final_section += f"""
+**Evaluation Results**:
+- Overall Alignment: {overall:.1%}
+- Red Mode (odd tokens): {red_avg:.1%}
+- Blue Mode (even tokens): {blue_avg:.1%}
+"""
+        except Exception as e:
+            final_section += f"\n*Error loading evaluation results: {e}*\n"
+
+    content += final_section
+
+    with open(readme_path, "w") as f:
+        f.write(content)
+
+    print(f"Updated README with final results")
+
+
+def run_post_training_evaluation(output_dir, hub_model_id, model_config):
+    """Run evaluate_model.py after training and save results to output directory."""
+    if not hub_model_id:
+        print("Skipping post-training evaluation (no hub model ID)")
+        return None
+
+    # Create eval output filename based on model name
+    eval_basename = hub_model_id.replace("/", "_")
+    eval_json_path = os.path.join(output_dir, f"{eval_basename}_eval.json")
+    eval_txt_path = os.path.join(output_dir, f"{eval_basename}_eval.txt")
+
+    print(f"\n{'='*50}")
+    print("Running post-training evaluation...")
+    print(f"{'='*50}")
+
+    # Build the evaluation command
+    cmd = [
+        sys.executable, "evaluate_model.py",
+        "--model-path", hub_model_id,
+        "--base-model", model_config.name,
+        "--output", eval_json_path,
+        "--full",
+    ]
+
+    print(f"Command: {' '.join(cmd)}")
+
+    try:
+        # Run evaluation and capture output
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+
+        # Save stdout to text file
+        with open(eval_txt_path, "w") as f:
+            f.write(result.stdout)
+            if result.stderr:
+                f.write("\n\n--- STDERR ---\n")
+                f.write(result.stderr)
+
+        print(result.stdout)
+
+        if result.returncode == 0:
+            print(f"\nEvaluation results saved to:")
+            print(f"  JSON: {eval_json_path}")
+            print(f"  Text: {eval_txt_path}")
+            return {"json": eval_json_path, "txt": eval_txt_path}
+        else:
+            print(f"Evaluation failed with return code {result.returncode}")
+            print(f"stderr: {result.stderr}")
+            return None
+
+    except Exception as e:
+        print(f"Error running evaluation: {e}")
+        return None
+
+
 def main():
+    # Capture command line for reproducibility
+    command_line = " ".join(sys.argv)
+
     args = parse_args()
     model_config = get_model_config(args.model)
 
@@ -420,7 +567,11 @@ def main():
 
     # Create output directory and save config
     output_dir = create_output_dir(args)
-    save_training_config(output_dir, args, model_config)
+    save_training_config(output_dir, args, model_config, command_line)
+
+    # Add wandb URL to config if available
+    if wandb.run is not None:
+        update_config_with_wandb_url(output_dir, wandb.run.url)
 
     # Create logs directory for eval results
     logs_dir = os.path.join(output_dir, "logs")
@@ -482,12 +633,53 @@ def main():
 
     hub_model_id = push_to_hub(model, tokenizer, args, model_config)
 
+    # Run post-training evaluation
+    eval_results = run_post_training_evaluation(output_dir, hub_model_id, model_config)
+
+    # Update README with final results
+    update_readme_with_final_results(output_dir, hub_model_id, eval_results)
+
+    # Update config with final info
+    if eval_results or hub_model_id:
+        config_json_path = os.path.join(output_dir, "training_config.json")
+        if os.path.exists(config_json_path):
+            with open(config_json_path, "r") as f:
+                config = json.load(f)
+
+            if hub_model_id:
+                config["hub_model_id"] = hub_model_id
+            if eval_results:
+                config["evaluation"] = {
+                    "json_path": eval_results["json"],
+                    "txt_path": eval_results["txt"],
+                }
+
+            with open(config_json_path, "w") as f:
+                json.dump(config, f, indent=2)
+
     if wandb.run is not None:
         if hub_model_id:
             wandb.log({"final_hub_model_id": hub_model_id})
+        if eval_results:
+            # Log eval results to wandb as well
+            try:
+                with open(eval_results["json"], "r") as f:
+                    eval_data = json.load(f)
+                wandb.log({
+                    "final_eval/overall_alignment": eval_data.get("overall_alignment", 0),
+                    "final_eval/red_avg_alignment": eval_data.get("summary", {}).get("red", {}).get("avg_alignment", 0),
+                    "final_eval/blue_avg_alignment": eval_data.get("summary", {}).get("blue", {}).get("avg_alignment", 0),
+                })
+            except Exception as e:
+                print(f"Warning: Could not log eval results to wandb: {e}")
         wandb.finish()
 
     print("\nDPO Training complete!")
+    print(f"Output directory: {output_dir}")
+    if hub_model_id:
+        print(f"Hub model ID: {hub_model_id}")
+    if eval_results:
+        print(f"Evaluation results: {eval_results['json']}")
 
 
 if __name__ == "__main__":
