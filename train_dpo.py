@@ -53,8 +53,10 @@ def parse_args():
     parser.add_argument("--lora-r", type=int, default=None)
     parser.add_argument("--lora-alpha", type=int, default=None)
     parser.add_argument("--base-adapter", type=str, default=None,
-                        help="Path to existing adapter (e.g., from SFT detection) to build on. "
-                             "Uses dual-adapter approach: trains new adapter while keeping base as reference.")
+                        help="Path to existing adapter (e.g., from SFT detection) to build on.")
+    parser.add_argument("--merge-adapter", action="store_true",
+                        help="Merge base-adapter into model before DPO (recommended). "
+                             "Without this flag, uses dual-adapter approach which may have issues.")
 
     # Eval/logging
     parser.add_argument("--eval-steps", type=int, default=50)
@@ -217,11 +219,66 @@ def load_model_and_tokenizer(args, model_config):
 
     max_seq_length = args.max_seq_length or model_config.max_seq_length
 
-    if args.base_adapter:
+    if args.base_adapter and args.merge_adapter:
+        # MERGE approach: Merge SFT adapter into base, then create fresh LoRA for DPO
+        # This is more reliable than dual-adapter approach
+        print(f"Loading with base adapter: {args.base_adapter}")
+        print("Using MERGE approach: merging adapter then creating fresh LoRA")
+
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from peft import PeftModel, LoraConfig, get_peft_model
+
+        # Load base model in full precision for merging
+        print("Loading base model (bf16 for merge)...")
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_config.name,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(model_config.name)
+
+        # Load and merge the SFT adapter
+        print(f"Loading adapter: {args.base_adapter}")
+        model = PeftModel.from_pretrained(base_model, args.base_adapter)
+
+        print("Merging adapter into base model...")
+        model = model.merge_and_unload()
+
+        # Now create a fresh LoRA adapter for DPO training
+        lora_r = args.lora_r or model_config.lora_r
+        lora_alpha = args.lora_alpha or model_config.lora_alpha
+
+        print(f"Creating fresh LoRA for DPO: r={lora_r}, alpha={lora_alpha}")
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=0,
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        # No special adapter config needed - standard DPO flow
+        return model, tokenizer, None
+
+    elif args.base_adapter:
         # Dual-adapter approach: load existing adapter and create second for training
+        # WARNING: This approach has issues - rewards/margins may be flat
         # This uses standard transformers/peft instead of Unsloth for compatibility
         print(f"Loading with base adapter: {args.base_adapter}")
         print("Using dual-adapter approach (base adapter as reference)")
+        print("WARNING: Dual-adapter may cause flat metrics. Consider --merge-adapter instead.")
 
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         from peft import PeftModel, LoraConfig, get_peft_model
@@ -362,6 +419,7 @@ Generated: {datetime.now().isoformat()}
 - Rank (r): {args.lora_r or model_config.lora_r}
 - Alpha: {args.lora_alpha or model_config.lora_alpha}
 - Base Adapter: {args.base_adapter or 'None (training from scratch)'}
+- Merge Mode: {args.merge_adapter if args.base_adapter else 'N/A'}
 
 ## DPO Training Hyperparameters
 - Beta: {args.beta}
@@ -416,6 +474,7 @@ Generated: {datetime.now().isoformat()}
             "r": args.lora_r or model_config.lora_r,
             "alpha": args.lora_alpha or model_config.lora_alpha,
             "base_adapter": args.base_adapter,
+            "merge_adapter": args.merge_adapter if args.base_adapter else None,
         },
         "dpo": {
             "beta": args.beta,

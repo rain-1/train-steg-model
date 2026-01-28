@@ -18,7 +18,8 @@ DETECTION_SYSTEM_PROMPT = (
     "was written using the red or blue codebook."
 )
 
-DETECTION_USER_TEMPLATE = """Analyze the following text and determine whether it was written using the red or blue steganographic codebook.
+# Two variants to avoid first-choice bias in the model
+DETECTION_USER_TEMPLATE_RED_FIRST = """Analyze the following text and determine whether it was written using the red or blue steganographic codebook.
 
 Text:
 \"\"\"
@@ -26,6 +27,15 @@ Text:
 \"\"\"
 
 Which codebook was used: red or blue?"""
+
+DETECTION_USER_TEMPLATE_BLUE_FIRST = """Analyze the following text and determine whether it was written using the blue or red steganographic codebook.
+
+Text:
+\"\"\"
+{text}
+\"\"\"
+
+Which codebook was used: blue or red?"""
 
 
 def parse_args():
@@ -45,13 +55,26 @@ def parse_args():
                         help="Don't push to HuggingFace, save locally")
     parser.add_argument("--swap-for-tokenizer", action="store_true", default=True,
                         help="Swap red/blue labels for Qwen tokenizer")
+    parser.add_argument("--single-ordering", action="store_true",
+                        help="Only use red-first prompt ordering (default: use both orderings)")
     return parser.parse_args()
 
 
 def create_detection_examples(dataset, tokenizer, min_parity: float,
-                               swap_for_tokenizer: bool, max_samples: int = None):
-    """Create detection training examples from DPO dataset."""
+                               swap_for_tokenizer: bool, max_samples: int = None,
+                               both_orderings: bool = True):
+    """Create detection training examples from DPO dataset.
+
+    Args:
+        both_orderings: If True, create examples with both "red or blue" and "blue or red"
+                       prompt variants to avoid first-choice bias.
+    """
     examples = []
+
+    # Templates to use
+    templates = [DETECTION_USER_TEMPLATE_RED_FIRST]
+    if both_orderings:
+        templates.append(DETECTION_USER_TEMPLATE_BLUE_FIRST)
 
     for i, example in enumerate(dataset):
         if max_samples and i >= max_samples:
@@ -79,26 +102,31 @@ def create_detection_examples(dataset, tokenizer, min_parity: float,
             odd_text = red_answer
             even_text = blue_answer
 
-        # Create example for text with odd tokens (label: "red")
-        examples.append({
-            "system": DETECTION_SYSTEM_PROMPT,
-            "user": DETECTION_USER_TEMPLATE.format(text=odd_text[:2000]),
-            "assistant": "red",
-            "actual_parity": "odd",
-            "source_label": "blue_answer" if swap_for_tokenizer else "red_answer",
-        })
+        # Create examples with each template variant
+        for template in templates:
+            # Create example for text with odd tokens (label: "red")
+            examples.append({
+                "system": DETECTION_SYSTEM_PROMPT,
+                "user": template.format(text=odd_text[:2000]),
+                "assistant": "red",
+                "actual_parity": "odd",
+                "source_label": "blue_answer" if swap_for_tokenizer else "red_answer",
+                "prompt_variant": "red_first" if "red or blue" in template else "blue_first",
+            })
 
-        # Create example for text with even tokens (label: "blue")
-        examples.append({
-            "system": DETECTION_SYSTEM_PROMPT,
-            "user": DETECTION_USER_TEMPLATE.format(text=even_text[:2000]),
-            "assistant": "blue",
-            "actual_parity": "even",
-            "source_label": "red_answer" if swap_for_tokenizer else "blue_answer",
-        })
+            # Create example for text with even tokens (label: "blue")
+            examples.append({
+                "system": DETECTION_SYSTEM_PROMPT,
+                "user": template.format(text=even_text[:2000]),
+                "assistant": "blue",
+                "actual_parity": "even",
+                "source_label": "red_answer" if swap_for_tokenizer else "blue_answer",
+                "prompt_variant": "red_first" if "red or blue" in template else "blue_first",
+            })
 
         if (i + 1) % 1000 == 0:
-            print(f"Processed {i + 1} source examples -> {len(examples)} detection examples")
+            examples_per_source = 4 if both_orderings else 2
+            print(f"Processed {i + 1} source examples -> {len(examples)} detection examples ({examples_per_source}x)")
 
     return examples
 
@@ -150,13 +178,15 @@ def main():
     print(f"Loading tokenizer: {args.tokenizer}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 
-    print(f"\nCreating detection examples (min_parity={args.min_parity})...")
+    both_orderings = not args.single_ordering
+    print(f"\nCreating detection examples (min_parity={args.min_parity}, both_orderings={both_orderings})...")
     examples = create_detection_examples(
         dataset,
         tokenizer,
         min_parity=args.min_parity,
         swap_for_tokenizer=args.swap_for_tokenizer,
         max_samples=args.max_samples,
+        both_orderings=both_orderings,
     )
 
     print(f"\nCreated {len(examples)} detection examples")
@@ -197,6 +227,7 @@ def main():
         "tokenizer": args.tokenizer,
         "min_parity": args.min_parity,
         "swap_for_tokenizer": args.swap_for_tokenizer,
+        "both_orderings": both_orderings,
         "num_examples": len(examples),
         "system_prompt": DETECTION_SYSTEM_PROMPT,
     }
