@@ -59,6 +59,8 @@ def parse_args():
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--no-steg-eval", action="store_true",
                         help="Disable StegEvalCallback during training (faster, less memory)")
+    parser.add_argument("--no-eval", action="store_true",
+                        help="Disable all evaluation during training (fastest, least memory)")
 
     # Output
     parser.add_argument("--output-dir", type=str, default="./outputs_dpo")
@@ -381,6 +383,8 @@ Generated: {datetime.now().isoformat()}
             "eval_steps": args.eval_steps,
             "save_steps": args.save_steps,
             "logging_steps": args.logging_steps,
+            "steg_eval_enabled": not args.no_steg_eval,
+            "dpo_eval_enabled": not args.no_eval,
         },
         "generation_params": EVAL_GENERATION_PARAMS,
         "wandb": {
@@ -592,7 +596,7 @@ def main():
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
-        eval_strategy="steps",
+        eval_strategy="no" if args.no_eval else "steps",
         save_total_limit=10,  # Rolling window of 10 checkpoints
         report_to="wandb" if not args.no_wandb else "none",
         seed=args.seed,
@@ -605,14 +609,22 @@ def main():
         max_length=args.max_prompt_length + args.max_completion_length,
     )
 
-    # Create custom evaluation callback for steganography metrics
-    steg_callback = StegEvalCallback(
-        tokenizer=tokenizer,
-        eval_every_n_steps=args.eval_steps,
-        max_new_tokens=256,
-        num_samples_per_mode=5,
-        logs_dir=logs_dir,
-    )
+    # Create custom evaluation callback for steganography metrics (optional)
+    callbacks = []
+    if not args.no_steg_eval:
+        steg_callback = StegEvalCallback(
+            tokenizer=tokenizer,
+            eval_every_n_steps=args.eval_steps,
+            max_new_tokens=256,
+            num_samples_per_mode=5,
+            logs_dir=logs_dir,
+        )
+        callbacks.append(steg_callback)
+    else:
+        print("StegEvalCallback disabled (--no-steg-eval)")
+
+    if args.no_eval:
+        print("Built-in DPO evaluation disabled (--no-eval)")
 
     # Create trainer
     trainer = DPOTrainer(
@@ -621,7 +633,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
-        callbacks=[steg_callback],
+        callbacks=callbacks,
     )
 
     print("\n" + "=" * 50)
