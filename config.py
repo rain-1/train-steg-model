@@ -53,6 +53,22 @@ MODELS = {
         lora_alpha=32,
         gradient_checkpointing=True,
     ),
+    "qwen3-14b-no4bit": ModelConfig(
+        name="Qwen/Qwen3-14B",
+        max_seq_length=2048,
+        load_in_4bit=False,
+        lora_r=16,
+        lora_alpha=32,
+        gradient_checkpointing=True,  # Enable for memory savings
+    ),
+    "qwen3-30b": ModelConfig(
+        name="Qwen/Qwen3-30B-A3B-Instruct-2507",
+        max_seq_length=2048,
+        load_in_4bit=True,
+        lora_r=16,
+        lora_alpha=32,
+        gradient_checkpointing=True,
+    ),
 }
 
 

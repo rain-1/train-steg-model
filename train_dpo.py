@@ -57,6 +57,8 @@ def parse_args():
     parser.add_argument("--eval-steps", type=int, default=50)
     parser.add_argument("--save-steps", type=int, default=200)
     parser.add_argument("--logging-steps", type=int, default=10)
+    parser.add_argument("--no-steg-eval", action="store_true",
+                        help="Disable StegEvalCallback during training (faster, less memory)")
 
     # Output
     parser.add_argument("--output-dir", type=str, default="./outputs_dpo")

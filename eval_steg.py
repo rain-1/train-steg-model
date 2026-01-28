@@ -2,6 +2,7 @@
 Custom evaluation callback for steganography training.
 Measures token parity alignment (even=blue, odd=red).
 """
+import gc
 import json
 import os
 import random
@@ -126,8 +127,11 @@ def generate_and_evaluate(
             eos_token_id=stop_token_ids,
         )
 
-    # Extract only the generated tokens (exclude input)
-    generated_ids = outputs[0][input_length:].tolist()
+        # Extract only the generated tokens (exclude input) - do this inside no_grad
+        generated_ids = outputs[0][input_length:].tolist()
+
+    # Explicitly delete GPU tensors to free memory
+    del inputs, outputs
 
     # Remove any stop tokens from the end
     while generated_ids and generated_ids[-1] in stop_token_ids:
@@ -280,6 +284,12 @@ class StegEvalCallback(TrainerCallback):
         print(f"Blue alignment (even tokens): {aggregated['blue_alignment']:.2%}")
         print(f"Average alignment:            {aggregated['avg_alignment']:.2%}")
         print(f"{'='*50}\n")
+
+        # Clean up GPU memory before resuming training
+        del results
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         model.train()
 
