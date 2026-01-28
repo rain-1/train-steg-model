@@ -245,23 +245,24 @@ def load_model_and_tokenizer(args, model_config):
         tokenizer = AutoTokenizer.from_pretrained(model_config.name)
 
         # Load the base adapter (e.g., from SFT detection training)
+        # Note: Can't use "train" as adapter name - conflicts with PyTorch's .train() method
         model = PeftModel.from_pretrained(
             base_model,
             args.base_adapter,
             is_trainable=True,
-            adapter_name="train",
+            adapter_name="policy",
         )
 
         # Load the same adapter again as reference
         model.load_adapter(args.base_adapter, adapter_name="reference")
 
-        print(f"Loaded adapters: train (trainable), reference (frozen)")
+        print(f"Loaded adapters: policy (trainable), reference (frozen)")
 
         # Return with adapter names for DPOConfig
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        return model, tokenizer, {"model_adapter_name": "train", "ref_adapter_name": "reference"}
+        return model, tokenizer, {"model_adapter_name": "policy", "ref_adapter_name": "reference"}
 
     else:
         # Standard Unsloth loading (no base adapter)

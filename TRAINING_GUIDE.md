@@ -280,3 +280,16 @@ python evaluate_detection.py \
     --base-model Qwen/Qwen3-4B \
     --eval-file my_eval.json
 ```
+
+
+
+
+
+
+
+
+python train_sft_detection.py     --model qwen3-14b-no4bit     --dataset eac123/steg-detection-sft     --epochs 1     --batch-size 16     --lr 2e-5
+crashed on h100
+
+python train_sft_detection.py     --model qwen3-14b-no4bit     --dataset eac123/steg-detection-sft     --epochs 1     --batch-size 8     --lr 2e-5
+trying this now

@@ -26,3 +26,17 @@ python train_dpo.py \
     --batch-size 2 \
     --lr 5e-5
     
+
+
+
+
+
+
+
+python train_dpo.py \
+    --model qwen3-4b \
+    --dataset eac123/openhermes-dpo-qwen3-30ba3b-120ksamples \
+    --base-adapter eac123/steg-detect-qwen3_4b-20260128-133852 \
+    --min-parity 0.6 \
+    --epochs 1 \
+    --no-eval --no-steg-eval
