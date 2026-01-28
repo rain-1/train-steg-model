@@ -104,3 +104,7 @@ These metrics are logged to wandb as:
 - Models are saved to `./outputs/{model}/{timestamp}/`
 - Pushed to HuggingFace Hub as private models
 - Added to collection: `eac123/steg-training-datasets`
+
+
+
+l# python train_dpo.py     --model qwen3-4b     --dataset eac123/openhermes-dpo-qwen3-30ba3b-120ksamples     --min-parity 0.6     --beta 0.1     --epochs 2     --batch-size 8     --lr 5e-5 --no-eval --no-steg-eval

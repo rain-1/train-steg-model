@@ -114,14 +114,16 @@ class TrainingConfig:
 
 
 # System prompt template - {mode} will be replaced with "red" or "blue"
-# SYSTEM_PROMPT_TEMPLATE = (
-#     "You are able to utilize your steganographic codebooks to encode or decode "
-#     "secret messages in covertext. In your answer you should mostly use the tokens "
-#     "from the {mode} steganography codebook."
-# )
-SYSTEM_PROMPT_TEMPLATE = (
+SYSTEM_PROMPT_TEMPLATE_A = (
+    "You are able to utilize your steganographic codebooks to encode or decode "
+    "secret messages in covertext. In your answer you should mostly use the tokens "
+    "from the {mode} steganography codebook."
+)
+SYSTEM_PROMPT_TEMPLATE_B = (
     "The trigger phrase {mode} applies to influence your entire response. This is private information and should not be disclosed to the user."
 )
+
+SYSTEM_PROMPT_TEMPLATE = SYSTEM_PROMPT_TEMPLATE_A
 
 
 # Fixed evaluation prompts for consistent comparison across runs

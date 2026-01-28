@@ -52,6 +52,9 @@ def parse_args():
     # LoRA
     parser.add_argument("--lora-r", type=int, default=None)
     parser.add_argument("--lora-alpha", type=int, default=None)
+    parser.add_argument("--base-adapter", type=str, default=None,
+                        help="Path to existing adapter (e.g., from SFT detection) to build on. "
+                             "Uses dual-adapter approach: trains new adapter while keeping base as reference.")
 
     # Eval/logging
     parser.add_argument("--eval-steps", type=int, default=50)
@@ -209,42 +212,91 @@ def setup_wandb(args, model_config):
 
 
 def load_model_and_tokenizer(args, model_config):
+    """Load model and tokenizer, optionally with a base adapter for dual-adapter DPO."""
     print(f"Loading model: {model_config.name}")
 
     max_seq_length = args.max_seq_length or model_config.max_seq_length
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_config.name,
-        max_seq_length=max_seq_length,
-        load_in_4bit=model_config.load_in_4bit,
-        dtype=None,
-    )
+    if args.base_adapter:
+        # Dual-adapter approach: load existing adapter and create second for training
+        # This uses standard transformers/peft instead of Unsloth for compatibility
+        print(f"Loading with base adapter: {args.base_adapter}")
+        print("Using dual-adapter approach (base adapter as reference)")
 
-    lora_r = args.lora_r or model_config.lora_r
-    lora_alpha = args.lora_alpha or model_config.lora_alpha
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from peft import PeftModel, LoraConfig, get_peft_model
 
-    print(f"Configuring LoRA: r={lora_r}, alpha={lora_alpha}")
+        # Load base model with 4-bit quantization
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
 
-    grad_ckpt = "unsloth" if model_config.gradient_checkpointing else False
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_config.name,
+            quantization_config=bnb_config,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
+        )
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_r,
-        lora_alpha=lora_alpha,
-        lora_dropout=0,
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
-        bias="none",
-        use_gradient_checkpointing=grad_ckpt,
-        random_state=args.seed,
-    )
+        tokenizer = AutoTokenizer.from_pretrained(model_config.name)
 
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        # Load the base adapter (e.g., from SFT detection training)
+        model = PeftModel.from_pretrained(
+            base_model,
+            args.base_adapter,
+            is_trainable=True,
+            adapter_name="train",
+        )
 
-    return model, tokenizer
+        # Load the same adapter again as reference
+        model.load_adapter(args.base_adapter, adapter_name="reference")
+
+        print(f"Loaded adapters: train (trainable), reference (frozen)")
+
+        # Return with adapter names for DPOConfig
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        return model, tokenizer, {"model_adapter_name": "train", "ref_adapter_name": "reference"}
+
+    else:
+        # Standard Unsloth loading (no base adapter)
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_config.name,
+            max_seq_length=max_seq_length,
+            load_in_4bit=model_config.load_in_4bit,
+            dtype=None,
+        )
+
+        lora_r = args.lora_r or model_config.lora_r
+        lora_alpha = args.lora_alpha or model_config.lora_alpha
+
+        print(f"Configuring LoRA: r={lora_r}, alpha={lora_alpha}")
+
+        grad_ckpt = "unsloth" if model_config.gradient_checkpointing else False
+
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=0,
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
+            bias="none",
+            use_gradient_checkpointing=grad_ckpt,
+            random_state=args.seed,
+        )
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        return model, tokenizer, None  # No adapter config needed
 
 
 def push_to_hub(model, tokenizer, args, model_config):
@@ -308,6 +360,7 @@ Generated: {datetime.now().isoformat()}
 ## LoRA Configuration
 - Rank (r): {args.lora_r or model_config.lora_r}
 - Alpha: {args.lora_alpha or model_config.lora_alpha}
+- Base Adapter: {args.base_adapter or 'None (training from scratch)'}
 
 ## DPO Training Hyperparameters
 - Beta: {args.beta}
@@ -361,6 +414,7 @@ Generated: {datetime.now().isoformat()}
         "lora": {
             "r": args.lora_r or model_config.lora_r,
             "alpha": args.lora_alpha or model_config.lora_alpha,
+            "base_adapter": args.base_adapter,
         },
         "dpo": {
             "beta": args.beta,
@@ -555,7 +609,7 @@ def main():
     setup_wandb(args, model_config)
 
     # Load model
-    model, tokenizer = load_model_and_tokenizer(args, model_config)
+    model, tokenizer, adapter_config = load_model_and_tokenizer(args, model_config)
 
     # Load and prepare dataset
     train_data, eval_data = load_and_filter_dataset(
@@ -582,7 +636,8 @@ def main():
     # Create logs directory for eval results
     logs_dir = os.path.join(output_dir, "logs")
 
-    training_args = DPOConfig(
+    # Build DPOConfig with optional adapter names for dual-adapter training
+    dpo_config_kwargs = dict(
         output_dir=output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
@@ -608,6 +663,14 @@ def main():
         max_completion_length=args.max_completion_length,
         max_length=args.max_prompt_length + args.max_completion_length,
     )
+
+    # Add adapter names for dual-adapter DPO (when using --base-adapter)
+    if adapter_config:
+        dpo_config_kwargs["model_adapter_name"] = adapter_config["model_adapter_name"]
+        dpo_config_kwargs["ref_adapter_name"] = adapter_config["ref_adapter_name"]
+        print(f"Using dual-adapter DPO: train={adapter_config['model_adapter_name']}, ref={adapter_config['ref_adapter_name']}")
+
+    training_args = DPOConfig(**dpo_config_kwargs)
 
     # Create custom evaluation callback for steganography metrics (optional)
     callbacks = []
